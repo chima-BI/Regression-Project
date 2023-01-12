@@ -1,0 +1,547 @@
+---
+title: "MRR BIO Project"
+author: "RIZKI Chaimae et JABILOU Hiba Binomial number:10"
+output:
+  html_document: default
+  pdf_document: 
+      latex_engine: xelatex
+---
+```{r}
+options(warn=-1)
+```
+
+# Introduction: 
+Our project aims at studying which markers explain well a precise phenotype. First we will conduct an exploratory data analysis in order to gain a better understanding of our covariables and the target variable(*Alkali spreading value*), Then we'll build multiple models in order to discover the covariables that have the most impact on the choosen phenotype. Finally, we will interpret the results and do a comparison between all the models we built based on the variables each model selected.
+
+# Part 1: Exploratory data analysis
+
+## Loading the data
+
+```{r}
+load("project_park.RData")
+```
+
+## The shape of the features matrix Xmat
+```{r}
+library(glue)
+glue('The number of rows: {nrow(Xmat)}. The number of columns: {ncol(Xmat)}.')
+```
+
+## Defining our target
+
+Let's first view a summary of the variables present in the phenotype dataset:
+```{r}
+summary(pheno.df)
+```
+
+
+We observed that the variable Alkali.spreading.value has the least missing values, so we decided to choose it as our target.
+```{r}
+target<-pheno.df$Alkali.spreading.value
+```
+
+## Calculating the correlation between the target and the covariables: 
+Our dataset contains many variables, so computing correlation matrix between the whole variables would be computationally expensive. That's why we first viewed correlations between each variable and the target to discover the most correlated with the target. We chose a significance level 0.3 to leave only the most correlated with the target. 
+
+
+```{r}
+corr_simple <- function(data=Xmat,sig=0.3){
+  
+  corr <- cor(target,data,method="kendall",use = "pairwise.complete.obs")
+  corr[lower.tri(corr,diag=TRUE)] <- NA 
+  corr[corr == 1] <- NA 
+  corr <- as.data.frame(as.table(corr))
+  corr <- na.omit(corr) 
+  corr <- subset(corr, abs(Freq) > sig) 
+  corr <- corr[order(-abs(corr$Freq)),] 
+  return (corr)
+}
+```
+
+## Discovering the correation between the covariables
+
+After discovering the variables that are the most correlated with the target, we'll plot the correlation matrix that describes the correlation between the variables.
+
+we will first select the 10 most correlated variables with the target.
+```{r}
+correlation_table<-corr_simple()
+correlation_table[1]<-NULL
+names(correlation_table)[1] <- "Feature"
+names(correlation_table)[2] <- "Correlation_value"
+correlation_table<-correlation_table[1:10,]
+correlation_table
+```
+
+The correlation table above shows that id6004500 is the variable that is the most correlated with our target, we will select the 10 most correlated variables from Xmat in order to view correlation between them.
+```{r}
+data<-Xmat[,c('id6004500','id1016702','id3006939','id8006130','id3007381','id6005779','id6005758','id6005732','id3007397','id3007408')]
+```
+
+**The correlation plot**: 
+```{r}
+target<-pheno.df$Alkali.spreading.value
+data<-data.frame(data)
+data$Target<-target
+head(data)
+library(ggplot2)
+library(ggcorrplot)
+ggcorrplot(cor(data,method="kendall",use = "pairwise.complete.obs"), hc.order = TRUE, type = "lower",
+   lab = TRUE)
+```
+The correlation plot above shows that many of our covariables are highly correlated. For example, id8006130 is highly correlated with id3006939 since the correlation value surpasses 0.7.
+
+## Exploring our covariables and our target
+
+### Distribution of target variable
+
+Our target variable is continuous we will plot a box plot of the target in order to understand better its distribution, and also check if there are any outliers. 
+
+```{r}
+boxplot(target)
+stripchart(target, vertical=TRUE,method = "jitter", pch = 19, add = TRUE, col = "blue")
+title(main = "Distribution of the target", xlab = "target", ylab = "values")
+
+  
+```
+
+
+According to the plot above, our target variable contains few outliers. Also, the median line isn't in the middle of the boxplot which means our dataset isn't symmetrical. In addition, the distribution is positively skewed, because the whisker and half-box are longer on the bottom side of the median than on the top side. Most of our data points take values that range from 5.5 and 7 which gives us an interquartile range of approximately 1.5 which means there isn't a very high variation in our data. 
+
+### Summary of the 10 most correlated variables with the target.
+```{r}
+names<-c('id6004500','id1016702','id3006939','id8006130','id3007381','id6005779','id6005758','id6005732','id3007397','id3007408')
+data[,names]<-lapply(data[,names],factor)
+summary(data)
+```
+
+According to the summary of our variables, there are many missing values. Since our features are categorical, we will impute the missing values with the mode. And for the target variable, we'll remove the missing values since all the values are needed for the target variable in order to build the model and test it.
+
+# Part 2: Missing values imputation and data partitionning
+
+## Missing value imputation for the covariables
+```{r}
+library(missMethods)
+data<-impute_mode(Xmat, type = "columnwise", convert_tibble = TRUE) #imputing with the use of mode
+```
+
+## Missing values removal for the target
+**Concatenating the target with the dataframe** 
+```{r}
+target<-pheno.df$Alkali.spreading.value
+data=data.frame(data)
+data$Target<-target
+```
+
+```{r}
+library(tidyverse)
+data=data[!is.na(data$Target),]
+dim(data)
+```
+
+## Data Partionning into train and test
+
+In order to build our model and evaluate its performance, it is mandatory to split the data into train and test. We chose a ratio of 0.2 for the test set.
+```{r}
+set.seed(4)
+index = sample(1:nrow(data), 0.8*nrow(data)) 
+
+train = data[index,] # Create the training data 
+test = data[-index,] # Create the test data
+
+dim(train)
+dim(test)
+```
+# Building the models:
+
+Since our target is continuous, we will build a linear regression model to explain the target with the help of the covariables. Our exploratory data analysis showed us previously that the number of covariables is much larger than the number of covariables. That's why we can't apply the standard linear model, and we will resort to penalized regression methods, forward linear regression and principal component regression.
+
+## Penalized regression methods:
+We are going to use lasso regression and ELastic Net, since they also perform variable selection by allowing coefficients to shrink to 0
+
+### Lasso Regression:
+In Lasso Regression, the OLS loss function is augmented and aletered in such a way that we not only minimize the sum of squared residuals but also penalize the size of parameter estimates, in order to shrink the least significant coefficients towards zero.
+**The lasso regression formula**:
+Let n be the number of observations, p the number of variables and x_i the i'th features vector and y_i the i'th target value. lambda is called the penalty term. Setting λ to 0 is the same as using the OLS, and as lambda increases, the penalty term increases and the coefficients shrink towards 0. The optimal value of lambda is found thanks to cross validation, we pick the lambda that minimizes the mean squared error.
+
+
+
+$$L_{lasso}(\beta)=\sum_{i=1}^{n}(y_i-x_i\beta)^2+\lambda\sum_{i=1}^{p}|\beta_i|$$
+
+**Finding the optimal lambda**: We perform cross validation on our train set, the number of folds is by default 10.
+
+```{r}
+X <- as.matrix(select(train,-Target))
+#  vector of target value
+Y<- train$Target
+library(glmnet)
+set.seed(4)
+cross_validation_lambda <- cv.glmnet(X, Y,alpha=1)
+```
+We'll plot the mean squared mean error with respect to lambda in order to gain an understanding about the lambda value that minimizes the error.
+
+```{r}
+plot(cross_validation_lambda)
+```
+Now, we'll retrieve the lambda value that minimizes the error
+
+```{r}
+optimal_lambda_lasso<-cross_validation_lambda$lambda.min
+library(glue)
+glue('The optimal lambda value: {optimal_lambda_lasso}')
+```
+```{r}
+library(glmnet)
+model_lasso<-glmnet(X, Y, alpha = 1 , lambda = optimal_lambda_lasso)
+```
+
+
+```{r}
+coef_dataframe_lasso<-coef(model_lasso)
+coef_dataframe_lasso=data.frame(coef_dataframe_lasso[coef_dataframe_lasso[,1]!=0,])
+names(coef_dataframe_lasso)[1] <- "Coefficient value"
+significant_coef_lasso=c()
+significant_coef_lasso<-append(significant_coef_lasso,row.names(coef_dataframe_lasso))
+significant_coef_lasso<- significant_coef_lasso[! significant_coef_lasso %in% c("(Intercept)")]
+library(glue)
+glue('The number of coefficients that the lasso regression has not nullified : {length(significant_coef_lasso)}')
+```
+
+```{r}
+grid=seq(0,0.5, by = 0.01)
+model<-glmnet(X,Y,lambda=grid,alpha=1)
+plot(model, xvar = "lambda",main="The evolution of coefficients with respect to log(lambda)")
+```
+
+As it’s shown in the picture above, as lambda increases, the less coefficicient estimates become close to 0. This helps our model to select only the significant variables.
+
+### Elastic Net regression:
+
+Elastic Net is a penalized regression method that allows a balance of both penalties(lasso
+and ridge regression). It relies on the hyper parameter alpha that balances the two penalization
+approaches : Set to 0 for ridge and 1 for lasso.
+
+
+**Elastic Net formula**:
+Let n be the total number of observations, p the number of covariables. y_i denotes the ith target value, and x_i denotes the ith observation vector. lambda is the penalty term, and lambda is the mixing parameter between ridge and lasso if it's 0, than the formula becomes the formula of ridge regression. if it's set to 1, than it's the formula of lasso regression. In order to find the optimal values for the hyperparameters lambda and alpha we have to apply cross validation on the train set.
+$$L_{enet}(\beta)=\frac{\sum_{i=1}^{n}(y_i-x_i\beta)^2}{2n}+\lambda(\alpha\sum_{i=1}^{p}|\beta_i| +\frac{1-\alpha}{2}\sum_{i=1}^{p}(\beta_i)^2)$$
+**Hyperparameter tuning for alpha**: To find the optimal value of alpha, we perform cross validation consisting of 10 folds on our training set, we test different values of alpha ranging from 0.1 to 0.9. The best alpha is the one that minimizes the mean squared error.
+
+```{r}
+alpha <- seq(0.1, 0.9, 0.1) #alpha is iterated from 0.1 to 0.9 
+best <- list(a=NULL, mse=NULL)
+ 
+for (i in 1:length(alpha)) 
+{
+   cvg <- cv.glmnet(X, Y, alpha = alpha[i])
+   best$a <- c(best$a, alpha[i])
+   best$mse <- c(best$mse, min(cvg$cvm))
+}
+index <- which(best$mse==min(best$mse))
+best_alpha <- best$a[index]
+best_mse <- best$mse[index]
+cat("alpha:", best_alpha, " mse:", best_mse)
+```
+
+**Hyperparameter tuning for lambda**: we apply cross-validation again with the best alpha to get the lambda (shrinkage level)
+```{r}
+elastic_cv <- cv.glmnet(X,Y, alpha = best_alpha)
+best_lambda <- elastic_cv$lambda.min
+cat("The best value for lambda: ",best_lambda)
+```
+
+```{r}
+plot(elastic_cv, xvar = "lambda",label=TRUE)
+```
+
+As it's shown in the plot above, lambda is chosen as the optimal value that minimizes the mean squared error.
+
+**Building the elastic net model**: now we will build the elastic net model with the optimal hyperparameters.
+
+```{r}
+elastic_mod <- glmnet(X, Y, alpha = best_alpha, lambda = best_lambda)
+```
+
+```{r}
+grid <- seq(0,1 , by = 0.1)  
+elastic<- glmnet(X, Y, alpha = best_alpha, lambda = grid)
+
+# Plot the coefficients against the (natural) LOG lambda sequence!
+# see ?plot.glmnet
+plot(elastic, xvar = "lambda", xlab = "log(lambda)",main="The evolution of the values of coefficients according to log lambda")
+# add a vertical line at lambda = 2
+text(log(best_lambda), -0.05, labels = expression(lambda == best_lambda),
+     adj = -0.5, col = "firebrick")
+abline(v = log(best_lambda), col = "firebrick", lwd = best_lambda)
+```
+
+As it's shown in the picture above, after the vertical line passing through the optimal lambda value, only significant coefficients are kept in the model, the rest is nullified. 
+```{r}
+coef_dataframe_elastic<-coef(elastic_mod)
+coef_dataframe_elastic=data.frame(coef_dataframe_elastic[coef_dataframe_elastic[,1]!=0,])
+names(coef_dataframe_elastic)[1] <- "Coefficient value"
+significant_coef_elastic=c()
+significant_coef_elastic<-append(significant_coef_elastic,row.names(coef_dataframe_elastic))
+significant_coef_elastic<- significant_coef_elastic[! significant_coef_elastic %in% c("(Intercept)")]
+library(glue)
+glue('The number of coefficients that the elastic net regression has not nullified: {length(significant_coef_elastic)}')
+```
+
+## Stepwise regression model:
+
+Another way to perform model selection is to use forward regression method. To apply this method on our dataset we will use the package bigstep which allows us to deal with high-dimensional data. First, since we are dealing with many predictors, we can start by removing those that are not strongly relate to the target. We perform the pearson correlation test and we calculate p-value for each covariable. We define a significance level of 0.15, so that variables with p-values higher than 0.15 will be removed. Next, we perform stepwise regression using the mbic which is modified version of the BIC that introduces a much heavier penalty, so that it helps us end up with a parsimonious model that is based on the most significant predictors.
+
+```{r}
+library(bigstep)
+data_selection<-prepare_data(Y,X)
+data_selection<-reduce_matrix(data_selection,minpv=0.15)
+results<-stepwise(data_selection,crit=mbic)
+significant_coef_stepwise=c()
+significant_coef_stepwise<-append(significant_coef_stepwise,rownames(data.frame(summary(results)$coefficients)))
+significant_coef_stepwise<- significant_coef_stepwise[! significant_coef_stepwise %in% c("(Intercept)")]
+summary(results)
+```
+## Best subset selection algorithm
+We run the best subset selection algorithm using the BeSS package, which is recommended for high dimensional data, and it suggests  optimized algorithms such as GPDAS to determine the optimal subset size, and builds models with the optimal subset size and selects the one that minimizes the specified criterion (BIC or AIC). Usually the best subset algorithm is computationally expensive but the BeSS runs the algorithm fast since the algorithms are built in C++.
+
+```{r}
+library("BeSS")
+fit.bestsubset <- bess(as.matrix(X), Y,family="gaussian",method = "sequential")
+significant_coef_bestsubset=c()
+significant_coef_bestsubset<-append(significant_coef_bestsubset,rownames(data.frame(summary(fit.bestsubset$bestmodel)$coefficients)))
+significant_coef_bestsubset<- significant_coef_bestsubset[! significant_coef_bestsubset %in% c("(Intercept)")]
+summary(fit.bestsubset$bestmodel)
+significant_coef_bestsubset
+```
+
+```{r}
+plot(fit.bestsubset)
+```
+In the plot above, the yellow dashed line represents the optimal number of variables that minimize the BIC criterion. We observe that 56 is the optimal number of variables. 
+
+# Evaluating and comparing the models:
+This part is dedicated to the comparison of the results yielded by each model, from a technical point of view (comparing metrics such as RMSE and R-squared) and also, form to compare the variable choosen as most significant by each model.
+
+## Comparison of the variables selected by each model
+```{r}
+#Models<-c("Lasso","Elastic Net","Stepwise")
+#Variables<-list(significant_coef_lasso,significant_coef_elastic,significant_coef_stepwise)
+#models=data.frame(cbind(Models, Variables))
+#models
+cat("Variables selected by Lasso regression: ",significant_coef_lasso,"\n\n")
+cat("Variable selected by Elastic Net: ", significant_coef_elastic,"\n\n")
+cat("Variables selected by Stepwise: ",significant_coef_stepwise,"\n\n")
+print("Variables selected by Best subset method")
+print(significant_coef_bestsubset)
+```
+
+The results above show that only one variable is selected in common between our three models, which means it is the variable id6004500 that helps explain well our target, which is not surprising, because according to the correlation matrix we computed before, it is the most correlated variable with the target. Concerning lasso and Elastic Net regression, most selected predictors are common between them.
+
+
+### PCA:
+Another way to deal with high dimensional data is to use PCA to reduce the dimensions while retaining as much variation
+between the observations as possible. Principal component analysis is used to extract the important information from a multivariate data table and to express this information as a set of few new variables called principal components using the Correlation or variance-covariance matrix.
+
+**How it works:** PCA first transforms the original variables to principal directions which we call the principal components (PCs). The principal components are a linear combinations set of the original variables, are uncorrelated, and are ordered/ranked. PCA then deems that the PCs with the largest variances are the most important (measured by eigenvalues).
+
+```{r}
+library("FactoMineR")
+library("factoextra")
+library(tidyverse)
+```
+
+
+```{r}
+features<-subset(select(data,-Target)) 
+res.pca<-PCA(features, graph = FALSE)
+```
+
+**get eigen values :**
+
+```{r}
+library("factoextra")
+eig.val <- get_eigenvalue(res.pca)
+eig.val
+```
+“get_eigenvalue” returns the eigenvalues of each principal components. Eigenvalues measure the amount of variation from each PC. For example, the first eigenvalue explains about 32.07% of the variation.
+
+We observe from first glance from the eigen values that the first dimension is the one retaining the most information with 32.07% of the variation while the second has an eigen value of 9.57% and the values keep getting lower until they are of no significance.
+
+
+**plot contributing variables and color them according to their contribution**
+
+The contribution of a variable (var) to a given principal component is (in percentage) : $(var.cos2 * 100) / (total cos2 of the component). $
+
+cos2 =  represents the quality of representation for variables on the factor map. It’s calculated as the squared coordinates: var.cos2 = var.coord * var.coord.
+
+```{r}
+
+fviz_pca_var(res.pca, col.var = "contrib",top=10,
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07")
+             )
+```
+
+Normally, this factor map is very useful for detecting the variables who contributed the most graphically but since the dataset contains many variables it is impossible to read the map.
+
+#### Getting the Contributions of the original variables on dimensions
+
+To select variables, we thought to observe their contributions on the new dimensions, thus we sorted the dataframe that gives the contribution information by descending order of contribution to DIM.1 and then to Dim.2. we picked the top 15 of each thus we selected the variables that have contributed the most in these dimensions since the first two PCs are the ones who contributes greatly to the variation and mainly the first one.
+**The contribution of a variable** (var) to a given principal component is (in percentage) : (var.cos2 * 100) / (total cos2 of the component).
+
+
+**Ordeing by Dim.1**
+```{r}
+var <- get_pca_var(res.pca)
+var
+head(var$contrib)
+contrib=data.frame(var$contrib)
+contribordered=contrib[order(contrib$Dim.1,decreasing = TRUE),c(1,2)] #ordering by descent the contribution of the original variables on dimensions
+variables1=head(contribordered,15)
+variables1
+```
+
+```{r}
+variables1[,0]
+```
+Thus if we search for the top 15 variables that contributed the most in **Dim1** , we have : ud9001405, id9007746, id9004988, id9005073, id9005141, id9007784, id9007779, id9007780, ud9001410, id5008733. We assume that these variables are the most significant since they contribute to Dim1 which is gives the most explanation.
+
+
+**Ordeing by Dim.2**
+```{r}
+contribordered2=contrib[order(contrib$Dim.2,decreasing = TRUE),c(1,2)] #ordering by descent the contribution of the original variables on dimensions
+variables2=head(contribordered2,15)
+variables2
+variables2[,0]
+
+```
+
+Thus if we search for the top 15 variables that contributed the most in **Dim2** :, we have : id6004033, id5013450, id5013620, id6004020, id9005245, id3015513, id3015584, id12008932, id3014874, id6013038
+
+**draw a bar plot of variable contributions : **
+
+The top 30 variables contriubution to Dim.1
+
+The red dashed line on the graph above indicates the expected average contribution.
+
+```{r}
+# Contributions of variables to PC1
+fviz_contrib(res.pca, choice = "var", axes = 1, top = 30)
+```
+
+The top 30 variables contriubution to Dim.2
+
+```{r}
+# Contributions of variables to PC2
+fviz_contrib(res.pca, choice = "var", axes = 2, top = 30)
+```
+
+
+**plot individuals and color them according to their quality on the factor map**
+
+cos2 =  represents the quality of representation for variables on the factor map. It’s calculated as the squared coordinates: var.cos2 = var.coord * var.coord.
+
+```{r}
+
+fviz_pca_ind(res.pca, col.ind = "cos2", 
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+             repel = TRUE # Avoid text overlapping (slow if many points)
+             )
+```
+
+#### Redoing PCA for 220 PCs
+
+**We set the number of PCS to 220,since it gives us a cumulative variance of approximately 95%.**
+
+
+```{r}
+res2.pca<-PCA(data,ncp=220, scale.unit = FALSE, graph = TRUE)
+```
+
+```{r}
+ind2 <- get_pca_ind(res2.pca)
+new_data2<-data.frame(ind2$coord)
+data2=new_data2
+data2$Target<-data$Target
+head(data2)
+```
+
+we split our dataset into train and test, with test ratio 20%.
+
+```{r}
+set.seed(4)
+index = sample(1:nrow(data2), 0.8*nrow(data2)) 
+
+train2 = data2[index,] # Create the training data 
+test2 = data2[-index,] # Create the test data
+
+dim(train2)
+dim(test2)
+```
+
+#### Building the linear model
+
+Next, we’ll perform linear regression using PCS (220) since thanks to PCA, n>p so we could apply the regression linear model.
+
+```{r}
+linear=lm(Target~ ., data=train2)
+summary(linear)
+```
+
+
+##### Which dimensions are significant 
+
+```{r}
+coef=data.frame(summary(linear)$coefficients[ ,4] <=0.05)
+colnames(coef)="Significance"
+which(coef$Significance==TRUE)
+```
+
+#### Calculating RMSE for train and the test set
+```{r}
+X_test<-as.matrix(subset( test, select = -Target ))
+y_test<-test$Target
+predicted_lasso=predict(model_lasso,X_test)
+predicted_elastic=predict(elastic_mod,X_test)
+predicted_stepwise=predict(lm( Target ~ id6004500+id5004697,data=data.frame(train)),data.frame(X_test))
+predicted_bestsubset=predict(fit.bestsubset$bestmodel,newdata=data.frame(X_test))
+library(Metrics)
+rmse_lasso_test=rmse(y_test,predicted_lasso)
+rmse_lasso_train=rmse(Y,predict(model_lasso,newx=as.matrix(X)))
+# Sum of Squares Total and Error
+sst <- sum((Y - mean(Y))^2)
+sse <- sum((Y - predict(model_lasso,as.matrix(X)))^2)
+rsq_lasso= 1 - sse/sst
+# for elastic net
+rmse_elastic_train=rmse(Y,predict(elastic_mod,as.matrix(X)))
+rmse_elastic_test=rmse(y_test,predicted_elastic)
+# Sum of Squares Total and Error
+sst <- sum((Y - mean(Y))^2)
+sse <- sum((Y - predict(elastic_mod,as.matrix(X)))^2)
+# R squared
+rsq_elastic <- 1 - (sse / sst)
+#for stepwise
+rmse_stepwise_test=rmse(y_test,predicted_stepwise)
+rmse_stepwise_train=rmse(Y,predict(lm( Target ~ id6004500+id5004697,data=data.frame(train)),data.frame(train)))
+rsq_stepwise=summary(lm( Target ~ id6004500+id5004697,data=data.frame(train)))$adj.r.squared
+#For Best Subset
+rmse_bestsubset_test=rmse(y_test,predicted_bestsubset)
+rmse_bestsubset_train=rmse(Y,predict(fit.bestsubset$bestmodel,data.frame(X)))
+rsq_bestsubset=summary(fit.bestsubset$bestmodel)$adj.r.squared
+#for PCA
+rmse_pca_test=rmse(test2$Target,predict(linear,test2))
+rmse_pca_train=rmse(train2$Target,predict(linear,train2))
+rsq_pca=summary(linear)$adj.r.squared
+Models=c("Lasso","Elastic Net","Stepwise","Best Subset","PCA")
+RMSE_Train=c(rmse_lasso_train,rmse_elastic_train,rmse_stepwise_train,rmse_bestsubset_train,rmse_pca_train)
+RMSE_Test=c(rmse_lasso_test,rmse_elastic_test,rmse_stepwise_test,rmse_bestsubset_test,rmse_pca_test)
+R_squared=c(rsq_lasso,rsq_elastic,rsq_stepwise,rsq_bestsubset,rsq_pca)
+Models_metrics=data.frame(Models,RMSE_Train,RMSE_Test,R_squared)
+library(formattable)
+formattable(Models_metrics, list(
+RMSE_Train = color_bar("#80ed99"),
+RMSE_Test = color_bar("#48cae4"),
+R_squared=color_bar("#0066FFFF")))
+
+```
+According to the table below, the best model is the best subset method since it gives us the best trade off between RMSE error and R squared. Also our goal is explaining the target variable not future predictions that's why the metric R squared is the most recommended to evaluate the performance of the models, that's why the best subset is the best model for our case.
+
+
